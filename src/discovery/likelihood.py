@@ -149,8 +149,8 @@ class PulsarLikelihood:
         # if there's only one woodbury to do (N + T Phi T)
         # as opposed to (N + T Phi T + ... + T Phi T)
         if isinstance(self.N.N, matrix.NoiseMatrix):
+            ksolve = self.N.make_kernelsolve_simple(self.y)
             def cond(params):
-                ksolve = self.N.make_kernelsolve_simple(self.y)
                 mu, Sigma = ksolve(params)
                 return mu, matrix.jsp.linalg.cho_factor(Sigma, lower=True)
             cond.params = sorted(self.N.N.params + self.N.P_var.params)
@@ -578,6 +578,7 @@ class ArrayLikelihood:
         Ns, self.ys = zip(*[(psl.N, psl.y) for psl in self.psls])
         self.vsm = matrix.VectorWoodburyKernel_varP(Ns, commongp.F, commongp.Phi)
         self.vsm.index = getattr(commongp, 'index', None)
+        self.vsm.means = getattr(commongp, 'means', None)
 
         if self.globalgp is None:
             loglike = self.vsm.make_kernelproduct(self.ys)

@@ -181,7 +181,7 @@ def makegp_ecorr_simple(psr, noisedict={}):
         return matrix.VariableGP(matrix.NoiseMatrix1D_var(getphi), Umat)
 
 # nanograv backends
-def makegp_ecorr(psr, noisedict={}, enterprise=False, scale=1.0, selection=selection_backend_flags, name='ecorrGP'):
+def makegp_ecorr(psr, noisedict={}, enterprise=False, scale=1.0, selection=selection_backend_flags, variable=False, name='ecorrGP'):
     log10_ecorrs, Umats = [], []
 
     backend_flags = selection(psr)
@@ -214,7 +214,19 @@ def makegp_ecorr(psr, noisedict={}, enterprise=False, scale=1.0, selection=selec
     if all(par in noisedict for par in params):
         phi = sum(10.0**(2 * (logscale + noisedict[log10_ecorr])) * pmask for (log10_ecorr, pmask) in zip(log10_ecorrs, pmasks))
 
-        return matrix.ConstantGP(matrix.NoiseMatrix1D_novar(phi), Umatall)
+        if variable:
+            def getphi(params):
+                return phi
+            getphi.params = []
+
+            gp = matrix.VariableGP(matrix.NoiseMatrix1D_var(getphi), Umatall)
+            gp.index = {f'{psr.name}_{name}_coefficients({Umatall.shape[1]})': slice(0,Umatall.shape[1])} # better for cosine
+            gp.name, gp.pos = psr.name, psr.pos
+            gp.gpname, gp.gpcommon = name, []
+
+            return gp
+        else:
+            return matrix.ConstantGP(matrix.NoiseMatrix1D_novar(phi), Umatall)
     else:
         pmasks = [matrix.jnparray(pmask) for pmask in pmasks]
         def getphi(params):
@@ -439,7 +451,8 @@ def makegp_fourier(psr, prior, components, T=None, mean=None, fourierbasis=fouri
 
 
 # for use in ArrayLikelihood. Same process for all pulsars.
-def makecommongp_fourier(psrs, prior, components, T, fourierbasis=fourierbasis, common=[], exclude=['f', 'df'], vector=False, name='fourierCommonGP'):
+def makecommongp_fourier(psrs, prior, components, T, fourierbasis=fourierbasis, means=None, common=[], exclude=['f', 'df'], vector=False,
+                         name='fourierCommonGP', meansname='meanFourierCommonGP'):
     argspec = inspect.getfullargspec(prior)
 
     if vector:
@@ -481,6 +494,25 @@ def makecommongp_fourier(psrs, prior, components, T, fourierbasis=fourierbasis, 
     gp = matrix.VariableGP(matrix.VectorNoiseMatrix12D_var(priorfunc), fmats)
     gp.index = {f'{psr.name}_{name}_coefficients({len(f)})': slice(len(f)*i,len(f)*(i+1))
                 for i, psr in enumerate(psrs)}
+
+    if means is not None:
+        margspec = inspect.getfullargspec(means)
+        margs = margspec.args + [arg for arg in margspec.kwonlyargs if arg not in margspec.kwonlydefaults]
+
+        # parameters carried by the pulsar objects (e.g., pos), should be at the beginning of function
+        psrpars = [{arg: getattr(psr, arg) for arg in margspec.args if hasattr(psrs[0], arg) and arg not in exclude}
+                   for psr in psrs]
+
+        # other means parameters, either common or pulsar-specific
+        margmaps = [{arg: f'{meansname}_{arg}' if (f'{meansname}_{arg}' in common or arg in common) else f'{psr.name}_{meansname}_{arg}'
+                     for arg in margs if not hasattr(psr, arg) and arg not in exclude} for psr in psrs]
+
+        def meanfunc(params):
+            return matrix.jnparray([means(f, df, *psrpar.values(), **{arg: params[argname] for arg, argname in margmap.items()})
+                                    for psrpar, margmap in zip(psrpars, margmaps)])
+        meanfunc.params = sorted(set.union(*[set(margmap.values()) for margmap in margmaps]))
+
+        gp.means = meanfunc
 
     return gp
 
@@ -631,10 +663,8 @@ def makeglobalgp_fourier(psrs, priors, orfs, components, T, fourierbasis=fourier
                    for psr in psrs]
 
         # other means parameters, either common or pulsar-specific
-        margmaps = [{arg: (f'{meansname}_{arg}' if f'{meansname}_{arg}' in common else f'{psr.name}_{meansname}_{arg}') +
-                     (f'({components})' if (margspec.annotations.get(arg) == typing.Sequence and components is not None) else '')
-                     for arg in margs if not hasattr(psr, arg) and arg not in exclude}
-                    for psr in psrs]
+        margmaps = [{arg: f'{meansname}_{arg}' if (f'{meansname}_{arg}' in common or arg in common) else f'{psr.name}_{meansname}_{arg}'
+                     for arg in margs if not hasattr(psr, arg) and arg not in exclude} for psr in psrs]
 
         def meanfunc(params):
             return jnp.concatenate([means(f, df, *psrpar.values(), **{arg: params[argname] for arg, argname in margmap.items()})
@@ -830,10 +860,11 @@ def psd2cov(psdfunc, components, T, oversample=3, fmax_factor=1, cutoff=1):
 
     return covmat
 
-def makegp_fftcov(psr, prior, components, T=None, t0=None, order=1, oversample=3, fmax_factor=1, cutoff=1, common=[], name='fftcovGP'):
+def makegp_fftcov(psr, prior, components, T=None, t0=None, order=1, oversample=3, fmax_factor=1, cutoff=1, fourierbasis=None, common=[], name='fftcovGP'):
     T = getspan(psr) if T is None else T
-    return makegp_fourier(psr, psd2cov(prior, components, T, oversample, fmax_factor, cutoff),
-                          components, T=T, fourierbasis=make_timeinterpbasis(start_time=t0, order=order), common=common, name=name)
+    return makegp_fourier(psr, psd2cov(prior, components, T, oversample, fmax_factor, cutoff), components, T=T,
+                          fourierbasis=(make_timeinterpbasis(start_time=t0, order=order) if fourierbasis is None else fourierbasis),
+                          common=common, name=name)
 
 def makegp_fftcov_dm(psr, prior, components, T=None, t0=None, order=1, oversample=3, fmax_factor=1, cutoff=1, common=[], name='fftcovGP_dm', fref=1400.0):
     T = getspan(psr) if T is None else T
@@ -860,13 +891,15 @@ def makegp_fftcov_solar(psr, prior, components, T=None, t0=None, order=1, oversa
     return makegp_fourier(psr, psd2cov(prior, components, T, oversample, fmax_factor, cutoff),
                           components, T=T, fourierbasis=make_timeinterpbasis_solar(start_time=t0, order=order), common=common, name=name)
 
-def makecommongp_fftcov(psrs, prior, components, T, t0=None, order=1, oversample=3, fmax_factor=1, cutoff=1, common=[], vector=False, name='fftcovCommonGP'):
-    return makecommongp_fourier(psrs, psd2cov(prior, components, T, oversample, fmax_factor, cutoff),
-                                components, T, fourierbasis=make_timeinterpbasis(start_time=t0, order=order), common=common, vector=vector, name=name)
+def makecommongp_fftcov(psrs, prior, components, T, t0=None, order=1, oversample=3, fmax_factor=1, cutoff=1, fourierbasis=None, common=[], vector=False, name='fftcovCommonGP'):
+    return makecommongp_fourier(psrs, psd2cov(prior, components, T, oversample, fmax_factor, cutoff), components, T,
+                                fourierbasis=(make_timeinterpbasis(start_time=t0, order=order) if fourierbasis is None else fourierbasis),
+                                common=common, vector=vector, name=name)
 
 def makeglobalgp_fftcov(psrs, prior, orf, components, T, t0, order=1, oversample=3, fmax_factor=1, cutoff=1, name='fftcovGlobalGP'):
-    return makeglobalgp_fourier(psrs, psd2cov(prior, components, T, oversample, fmax_factor, cutoff), orf,
-                                components, T, fourierbasis=make_timeinterpbasis(start_time=t0, order=order), name=name)
+    return makeglobalgp_fourier(psrs, psd2cov(prior, components, T, oversample, fmax_factor, cutoff), orf, components, T,
+                                fourierbasis=(make_timeinterpbasis(start_time=t0, order=order) if fourierbasis is None else fourierbasis),
+                                name=name)
 
 
 # time-interpolated covariance matrix from time-domain
