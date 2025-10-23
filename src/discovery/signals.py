@@ -345,6 +345,14 @@ def fourierbasis_chrom(psr, components, T=None, fref=1400.0):
 
     return f, df, fmatfunc
 
+def fourierbasis_chrom_fixed(psr, components, T=None, fref=1400.0):
+    f, df, fmat = fourierbasis(psr, components, T)
+
+    fmat, fnorm = matrix.jnparray(fmat), matrix.jnparray(fref / psr.freqs)
+    
+    chrom = fmat * fnorm[:, None]**4
+
+    return f, df, fmat * chrom[:, None]
 
 
 #def make_fourierbasis_chrom_inj(alpha):
@@ -629,7 +637,16 @@ def makeglobalgp_fourier(psrs, priors, orfs, components, T, fourierbasis=fourier
             orfcf = matrix.jsp.linalg.cho_factor(orfmat)
             def factors(params):
                 phi = prior(f, df, *[params[arg] for arg in argmap])
-                phicf = matrix.jsp.linalg.cho_factor(phi)
+                #phicf = matrix.jsp.linalg.cho_factor(phi)
+
+                # Handle diagonal (1D) phi by constructing its Cholesky factor explicitly
+                # so downstream cho_solve and logdet computations work without forming a full dense prior.
+                if getattr(phi, 'ndim', None) == 1:
+                    # L such that L @ L.T = diag(phi) is simply diag(sqrt(phi))
+                    L = matrix.jnp.diag(matrix.jnp.sqrt(phi))
+                    phicf = (L, True)
+                else:
+                    phicf = matrix.jsp.linalg.cho_factor(phi)
 
                 return orfcf, phicf
             factors.params = argmap

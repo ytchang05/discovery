@@ -7,6 +7,8 @@ import jax.numpy as jnp
 from . import matrix
 from . import const
 
+from . import solar
+
 
 def fpc_fast(pos, gwtheta, gwphi):
     x, y, z = pos
@@ -190,5 +192,17 @@ def chromatic_gaussian(psr, fref=1400.0):
 
     def delay(t0, log10_Amp, log10_sigma, sign_param, alpha):
         return jnp.sign(sign_param) * 10**log10_Amp * jnp.exp(-(toas - t0)**2 / (2 * (10**log10_sigma)**2)) * fnorm**alpha
+
+    return delay
+
+
+def sw_deterministic(psr):
+    """Deterministic solar wind delay model."""
+    theta, R_earth, _, _ = solar.theta_impact(psr)
+    def delay(n_earth):
+        
+        dm_sol_wind = solar.dm_solar(n_earth, theta, R_earth)
+        
+        return (dm_sol_wind) * 4.148808e3 / psr.freqs**2
 
     return delay
