@@ -29,12 +29,31 @@ def fpc_fast(pos, gwtheta, gwphi):
 
     return fplus, fcross
 
+def fpcmu_fast(pos, gwtheta, gwphi):
+    x, y, z = pos
+
+    sin_phi = jnp.sin(gwphi)
+    cos_phi = jnp.cos(gwphi)
+    sin_theta = jnp.sin(gwtheta)
+    cos_theta = jnp.cos(gwtheta)
+
+    m_dot_pos = sin_phi * x - cos_phi * y
+    n_dot_pos = -cos_theta * cos_phi * x - cos_theta * sin_phi * y + sin_theta * z
+    omhat_dot_pos = -sin_theta * cos_phi * x - sin_theta * sin_phi * y - cos_theta * z
+
+    denom = 1.0 + omhat_dot_pos
+
+    fplus = 0.5 * (m_dot_pos**2 - n_dot_pos**2) / denom
+    fcross = (m_dot_pos * n_dot_pos) / denom
+
+    return fplus, fcross, -omhat_dot_pos
+
 
 def makedelay_binary(pulsarterm=True):
-    def delay_binary(toas, pos, log10_h0, log10_f0, ra, sindec, cosinc, psi, phi_earth, phi_psr):
+    def delay_binary(toas, pos, log10_h, log10_f0, ra, sindec, cosinc, psi, phi_earth, phi_psr):
         """BBH residuals from Ellis et. al 2012, 2013"""
 
-        h0 = 10**log10_h0
+        h0 = 10**log10_h
         f0 = 10**log10_f0
 
         dec, inc = jnp.arcsin(sindec), jnp.arccos(cosinc)
@@ -113,13 +132,13 @@ def cos2comp(f, df, A, f0, phi, t0):
 
 
 def makefourier_binary(pulsarterm=True):
-    def fourier_binary(f, df, mintoa, pos, log10_h0, log10_f0, ra, sindec, cosinc, psi, phi_earth, phi_psr):
+    def fourier_binary(f, df, mintoa, pos, log10_h, log10_f0, ra, sindec, cos_inc, psi, phi_earth, phi_psr):
         """BBH residuals from Ellis et. al 2012, 2013"""
 
-        h0 = 10**log10_h0
+        h0 = 10**log10_h
         f0 = 10**log10_f0
 
-        dec, inc = jnp.arcsin(sindec), jnp.arccos(cosinc)
+        dec, inc = jnp.arcsin(sindec), jnp.arccos(cos_inc)
 
         # calculate antenna pattern (note: pos is pulsar sky position unit vector)
         fplus, fcross = fpc_fast(pos, 0.5 * jnp.pi - dec, ra)  # careful with dec -> gwtheta conversion
@@ -164,6 +183,341 @@ def makefourier_binary(pulsarterm=True):
         fourier_binary = functools.partial(fourier_binary, phi_psr=jnp.nan)
 
     return fourier_binary
+
+
+def makefourier_binary_pdist(pulsarterm=True):
+    def fourier_binary_pdist(f, df, mintoa, pos, log10_h, log10_f0, ra, sindec, cos_inc, psi, phi_earth, p_dist):
+        h0 = 10**log10_h
+        f0 = 10**log10_f0
+
+        pos = jnp.array(pos)
+        
+        dec, inc = jnp.arcsin(sindec), jnp.arccos(cos_inc)
+
+        # calculate antenna pattern
+        fplus, fcross = fpc_fast(pos, 0.5 * jnp.pi - dec, ra)
+
+        c = 2.99792458e8 
+        omega_hat = jnp.array([ -jnp.cos(dec) * jnp.cos(ra), 
+                                -jnp.cos(dec) * jnp.sin(ra),
+                                -jnp.sin(dec)
+                              ])
+
+        # Convert pulsar distance from kpc to meters to match c [m/s]
+        p_dist_m = p_dist * 3.0856775814913673e19  # 1 kpc in meters
+        phi_psr = (p_dist_m / c) * 2.0 * jnp.pi * f0  * (1.0 + jnp.dot(omega_hat, pos))
+
+        if pulsarterm:
+            phi_avg = 0.5 * (phi_earth + phi_psr)
+        else:
+            phi_avg = phi_earth
+
+        tref = 86400.0 * 51544.5  # MJD J2000 in seconds
+
+        cphase = cos2comp(f, df, 1.0, f0, phi_avg - 2.0 * jnp.pi * f0 * tref, mintoa)
+        sphase = cos2comp(f, df, 1.0, f0, phi_avg - 2.0 * jnp.pi * f0 * tref - 0.5 * jnp.pi, mintoa)
+
+        if pulsarterm:
+            phi_diff = 0.5 * (phi_earth - phi_psr)
+            sin_diff = jnp.sin(phi_diff)
+
+            delta_sin =  2.0 * cphase * sin_diff
+            delta_cos = -2.0 * sphase * sin_diff
+        else:
+            delta_sin = sphase
+            delta_cos = cphase
+
+        At = -1.0 * (1.0 + jnp.cos(inc)**2) * delta_sin
+        Bt =  2.0 * jnp.cos(inc) * delta_cos
+
+        alpha = h0 / (2 * jnp.pi * f0)
+
+        rplus  = alpha * (-At * jnp.cos(2 * psi) + Bt * jnp.sin(2 * psi))
+        rcross = alpha * ( At * jnp.sin(2 * psi) + Bt * jnp.cos(2 * psi))
+
+        res = -fplus * rplus - fcross * rcross
+
+        return res
+
+    if not pulsarterm:
+        fourier_binary_pdist = functools.partial(fourier_binary_pdist, p_dist=jnp.nan)
+
+    return fourier_binary_pdist
+
+def makefourier_binary_pdist_twoD(pulsarterm=True):
+    def fourier_binary_pdist_twoD(f, df, mintoa, pos, log10_h, log10_f0, ra, sindec, cos_inc, psi, phi_earth, 
+                             log10_h_2, log10_f0_2, ra_2, sindec_2, cos_inc_2, psi_2, phi_earth_2, p_dist):
+
+        h0 = 10**log10_h
+        f0 = 10**log10_f0
+
+        h0_2 = 10**log10_h_2
+        f0_2 = 10**log10_f0_2
+
+        pos = jnp.array(pos)
+
+        dec, inc = jnp.arcsin(sindec), jnp.arccos(cos_inc)
+        dec_2, inc_2 = jnp.arcsin(sindec_2), jnp.arccos(cos_inc_2)
+
+        # calculate antenna pattern
+        fplus, fcross = fpc_fast(pos, 0.5 * jnp.pi - dec, ra)
+        fplus_2, fcross_2 = fpc_fast(pos, 0.5 * jnp.pi - dec_2, ra_2)
+
+        c = 2.99792458e8 
+        omega_hat = jnp.array([ -jnp.cos(dec) * jnp.cos(ra), 
+                                -jnp.cos(dec) * jnp.sin(ra),
+                                -jnp.sin(dec)
+                              ])
+        omega_hat_2 = jnp.array([ -jnp.cos(dec_2) * jnp.cos(ra_2), 
+                                -jnp.cos(dec_2) * jnp.sin(ra_2),
+                                -jnp.sin(dec_2)
+                              ])
+
+        # Convert pulsar distance from kpc to meters to match c [m/s]
+        p_dist_m = p_dist * 3.0856775814913673e19  # 1 kpc in meters
+        phi_psr = (p_dist_m / c) * 2.0 * jnp.pi * f0  * (1.0 + jnp.dot(omega_hat, pos))
+
+        phi_psr_2 = (p_dist_m / c) * 2.0 * jnp.pi * f0_2  * (1.0 + jnp.dot(omega_hat_2, pos))
+
+
+        if pulsarterm:
+            phi_avg = 0.5 * (phi_earth + phi_psr)
+            phi_avg_2 = 0.5 * (phi_earth_2 + phi_psr_2)
+        else:
+            phi_avg = phi_earth
+            phi_avg_2 = phi_earth_2
+
+        tref = 86400.0 * 51544.5  # MJD J2000 in seconds
+
+        cphase = cos2comp(f, df, 1.0, f0, phi_avg - 2.0 * jnp.pi * f0 * tref, mintoa)
+        sphase = cos2comp(f, df, 1.0, f0, phi_avg - 2.0 * jnp.pi * f0 * tref - 0.5 * jnp.pi, mintoa)
+
+        cphase_2 = cos2comp(f, df, 1.0, f0_2, phi_avg_2 - 2.0 * jnp.pi * f0_2 * tref, mintoa)
+        sphase_2 = cos2comp(f, df, 1.0, f0_2, phi_avg_2 - 2.0 * jnp.pi * f0_2 * tref - 0.5 * jnp.pi, mintoa)
+
+        if pulsarterm:
+            phi_diff = 0.5 * (phi_earth - phi_psr)
+            sin_diff = jnp.sin(phi_diff)
+
+            delta_sin =  2.0 * cphase * sin_diff
+            delta_cos = -2.0 * sphase * sin_diff
+
+            phi_diff_2 = 0.5 * (phi_earth_2 - phi_psr_2)
+            sin_diff_2 = jnp.sin(phi_diff_2)
+
+            delta_sin_2 =  2.0 * cphase_2 * sin_diff_2
+            delta_cos_2 = -2.0 * sphase_2 * sin_diff_2
+        else:
+            delta_sin = sphase
+            delta_cos = cphase
+
+            delta_sin_2 = sphase_2
+            delta_cos_2 = cphase_2
+
+        At = -1.0 * (1.0 + jnp.cos(inc)**2) * delta_sin
+        Bt =  2.0 * jnp.cos(inc) * delta_cos
+
+        At_2 = -1.0 * (1.0 + jnp.cos(inc_2)**2) * delta_sin_2
+        Bt_2 =  2.0 * jnp.cos(inc_2) * delta_cos_2
+
+        alpha = h0 / (2 * jnp.pi * f0)
+
+        alpha_2 = h0_2 / (2 * jnp.pi * f0_2)
+
+        rplus  = alpha * (-At * jnp.cos(2 * psi) + Bt * jnp.sin(2 * psi))
+        rcross = alpha * ( At * jnp.sin(2 * psi) + Bt * jnp.cos(2 * psi))
+
+
+        rplus_2  = alpha_2 * (-At_2 * jnp.cos(2 * psi_2) + Bt_2 * jnp.sin(2 * psi_2))
+        rcross_2 = alpha_2 * ( At_2 * jnp.sin(2 * psi_2) + Bt_2 * jnp.cos(2 * psi_2))
+
+        res = -fplus * rplus - fcross * rcross
+        res2 = -fplus_2 * rplus_2 - fcross_2 * rcross_2
+
+        return res + res2
+
+    if not pulsarterm:
+        fourier_binary_pdist_twoD = functools.partial(fourier_binary_pdist_twoD, p_dist=jnp.nan)
+
+    return fourier_binary_pdist_twoD
+
+def make_phase_connected_binary(pulsarterm=True):
+    @functools.partial(jax.jit, static_argnames=("psr_term", "evolve"))
+    def phase_connected_binary(
+        toas,
+        pos,
+        cos_gwtheta,
+        gwphi,
+        cos_inc,
+        log10_mc,
+        log10_fgw,
+        log10_h,
+        phase0,
+        psi,
+        p_dist,
+        psr_term=pulsarterm,
+        evolve=True,
+        p_phase=None,
+        log10_dist=None,
+    ):
+
+        toas = jnp.asarray(toas)
+        pos = jnp.asarray(pos)
+        # pdist = jnp.asarray(pdist)
+
+        mc = (10.0 ** log10_mc) * const.Tsun
+        w0 = jnp.pi * (10.0 ** log10_fgw)
+        gwtheta = jnp.arccos(cos_gwtheta)
+        inc = jnp.arccos(cos_inc)
+        phase0_orb = 0.5 * phase0  # convert GW phase to orbital phase
+
+        # Determine distance or strain
+        if (log10_h is None) == (log10_dist is None):
+            raise ValueError("Provide exactly one of log10_dist or log10_h")
+        if log10_h is None:
+            dist = (10.0 ** log10_dist) * const.Mpc / const.c
+        else:
+            dist = 2.0 * mc ** (5.0 / 3.0) * w0 ** (2.0 / 3.0) / (10.0 ** log10_h)
+
+        fplus, fcross, cos_mu = fpcmu_fast(pos, gwtheta, gwphi)
+        tref = 86400.0 * 51544.5  # MJD J2000 in seconds 
+        toas_rel = toas - tref
+        ## This won't work with how I'm sampling it. I don't have a Gaussian prior on p_dist yet
+        #parallax_coeff = const.kpc / const.c * (pdist[0] + pdist[1] * p_dist)
+        parallax_coeff = const.kpc / const.c * p_dist
+        tp = toas_rel - parallax_coeff * (1.0 - cos_mu)
+        tp = jnp.where(psr_term, tp, toas_rel)
+
+        # Frequency/phase evolution
+        def evolve_phase(t, p_phase):
+            term = 1.0 - (256.0 / 5.0) * mc ** (5.0 / 3.0) * w0 ** (8.0 / 3.0) * t
+            omega = w0 * jnp.power(term, -3.0 / 8.0)
+            if p_phase is None:
+                phase = phase0_orb + (1.0 / (32.0 * mc ** (5.0 / 3.0))) * (
+                    w0 ** (-5.0 / 3.0) - omega ** (-5.0 / 3.0)
+                )
+            else:
+                phase = phase0_orb + p_phase + (1.0 / (32.0 * mc ** (5.0 / 3.0))) * (
+                    w0 ** (-5.0 / 3.0) - omega ** (-5.0 / 3.0)
+                )
+            return omega, phase
+
+        omega, phase = evolve_phase(toas_rel, p_phase=None) if evolve else (w0, w0 * toas_rel + phase0_orb)
+        omega_p, phase_p = evolve_phase(tp, p_phase) if evolve else (w0, w0 * tp + phase0_orb)
+
+        At = -0.5 * jnp.sin(2.0 * phase) * (3.0 + jnp.cos(2.0 * inc))
+        Bt = 2.0 * jnp.cos(2.0 * phase) * jnp.cos(inc)
+        At_p = -0.5 * jnp.sin(2.0 * phase_p) * (3.0 + jnp.cos(2.0 * inc))
+        Bt_p = 2.0 * jnp.cos(2.0 * phase_p) * jnp.cos(inc)
+
+        alpha = mc ** (5.0 / 3.0) / (dist * omega ** (1.0 / 3.0))
+        alpha_p = mc ** (5.0 / 3.0) / (dist * omega_p ** (1.0 / 3.0))
+
+        rplus = alpha * (-At * jnp.cos(2.0 * psi) + Bt * jnp.sin(2.0 * psi))
+        rcross = alpha * (At * jnp.sin(2.0 * psi) + Bt * jnp.cos(2.0 * psi))
+        rplus_p = alpha_p * (-At_p * jnp.cos(2.0 * psi) + Bt_p * jnp.sin(2.0 * psi))
+        rcross_p = alpha_p * (At_p * jnp.sin(2.0 * psi) + Bt_p * jnp.cos(2.0 * psi))
+
+
+        return jnp.where(
+            psr_term,
+            fplus * (rplus_p - rplus) + fcross * (rcross_p - rcross),
+            -fplus * rplus - fcross * rcross,
+        )
+    
+    if pulsarterm:
+        return functools.partial(phase_connected_binary, psr_term=True)
+    else:
+        return functools.partial(phase_connected_binary, psr_term=False, p_dist=0.0)
+
+def make_phase_unconnected_binary(pulsarterm=True):
+    @functools.partial(jax.jit, static_argnames=("psr_term", "evolve"))
+    def phase_unconnected_binary(
+        toas,
+        pos,
+        cos_gwtheta,
+        gwphi,
+        cos_inc,
+        log10_mc,
+        log10_fgw,
+        log10_h,
+        phase0,
+        psi,
+        p_dist,
+        psr_term=pulsarterm,
+        evolve=True,
+        p_phase=None,
+        log10_dist=None,
+    ):
+
+        toas = jnp.asarray(toas)
+        pos = jnp.asarray(pos)
+        # pdist = jnp.asarray(pdist)
+
+        mc = (10.0 ** log10_mc) * const.Tsun
+        w0 = jnp.pi * (10.0 ** log10_fgw)
+        gwtheta = jnp.arccos(cos_gwtheta)
+        inc = jnp.arccos(cos_inc)
+        phase0_orb = 0.5 * phase0  # convert GW phase to orbital phase
+
+        # Determine distance or strain
+        if (log10_h is None) == (log10_dist is None):
+            raise ValueError("Provide exactly one of log10_dist or log10_h")
+        if log10_h is None:
+            dist = (10.0 ** log10_dist) * const.Mpc / const.c
+        else:
+            dist = 2.0 * mc ** (5.0 / 3.0) * w0 ** (2.0 / 3.0) / (10.0 ** log10_h)
+
+        fplus, fcross, cos_mu = fpcmu_fast(pos, gwtheta, gwphi)
+        tref = 86400.0 * 51544.5  # MJD J2000 in seconds 
+        toas_rel = toas - tref
+        ## This won't work with how I'm sampling it. I don't have a Gaussian prior on p_dist yet
+        #parallax_coeff = const.kpc / const.c * (pdist[0] + pdist[1] * p_dist)
+        parallax_coeff = const.kpc / const.c * p_dist
+        tp = toas_rel - parallax_coeff * (1.0 - cos_mu)
+        tp = jnp.where(psr_term, tp, toas_rel)
+
+        # Frequency/phase evolution
+        def evolve_phase(t, p_phase):
+            term = 1.0 - (256.0 / 5.0) * mc ** (5.0 / 3.0) * w0 ** (8.0 / 3.0) * t
+            omega = w0 * jnp.power(term, -3.0 / 8.0)
+            if p_phase is None:
+                phase = phase0_orb + (1.0 / (32.0 * mc ** (5.0 / 3.0))) * (
+                    w0 ** (-5.0 / 3.0) - omega ** (-5.0 / 3.0)
+                )
+            else:
+                phase = phase0_orb + p_phase + (1.0 / (32.0 * mc ** (5.0 / 3.0))) * (
+                    w0 ** (-5.0 / 3.0) - omega ** (-5.0 / 3.0)
+                )
+            return omega, phase
+
+        omega, phase = evolve_phase(toas_rel, p_phase=None) if evolve else (w0, w0 * toas_rel + phase0_orb)
+        omega_p, phase_p = evolve_phase(tp, p_phase) if evolve else (w0, w0 * tp + phase0_orb)
+
+        At = -0.5 * jnp.sin(2.0 * phase) * (3.0 + jnp.cos(2.0 * inc))
+        Bt = 2.0 * jnp.cos(2.0 * phase) * jnp.cos(inc)
+        At_p = -0.5 * jnp.sin(2.0 * phase_p) * (3.0 + jnp.cos(2.0 * inc))
+        Bt_p = 2.0 * jnp.cos(2.0 * phase_p) * jnp.cos(inc)
+
+        alpha = mc ** (5.0 / 3.0) / (dist * omega ** (1.0 / 3.0))
+        alpha_p = mc ** (5.0 / 3.0) / (dist * omega_p ** (1.0 / 3.0))
+
+        rplus = alpha * (-At * jnp.cos(2.0 * psi) + Bt * jnp.sin(2.0 * psi))
+        rcross = alpha * (At * jnp.sin(2.0 * psi) + Bt * jnp.cos(2.0 * psi))
+        rplus_p = alpha_p * (-At_p * jnp.cos(2.0 * psi) + Bt_p * jnp.sin(2.0 * psi))
+        rcross_p = alpha_p * (At_p * jnp.sin(2.0 * psi) + Bt_p * jnp.cos(2.0 * psi))
+
+
+        return jnp.where(
+            psr_term,
+            fplus * (rplus_p - rplus) + fcross * (rcross_p - rcross),
+            -fplus * rplus - fcross * rcross,
+        )
+    
+    if pulsarterm:
+        return functools.partial(phase_unconnected_binary, psr_term=True)
+    else:
+        return functools.partial(phase_unconnected_binary, psr_term=False, p_dist=0.0)
 
 
 def chromatic_exponential(psr, fref=1400.0):
