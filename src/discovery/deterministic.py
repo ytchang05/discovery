@@ -341,7 +341,7 @@ def makefourier_binary_pdist_twoD(pulsarterm=True):
 
     return fourier_binary_pdist_twoD
 
-def make_phase_connected_binary(pulsarterm=True):
+def make_phase_connected_binary(pulsarterm=True, evolve=True):
     @functools.partial(jax.jit, static_argnames=("psr_term", "evolve"))
     def phase_connected_binary(
         toas,
@@ -356,7 +356,7 @@ def make_phase_connected_binary(pulsarterm=True):
         psi,
         p_dist,
         psr_term=pulsarterm,
-        evolve=True,
+        evolve=evolve,
         p_phase=None,
         log10_dist=None,
     ):
@@ -401,7 +401,7 @@ def make_phase_connected_binary(pulsarterm=True):
                     w0 ** (-5.0 / 3.0) - omega ** (-5.0 / 3.0)
                 )
             return omega, phase
-
+        
         omega, phase = evolve_phase(toas_rel, p_phase=None) if evolve else (w0, w0 * toas_rel + phase0_orb)
         omega_p, phase_p = evolve_phase(tp, p_phase) if evolve else (w0, w0 * tp + phase0_orb)
 
@@ -426,9 +426,13 @@ def make_phase_connected_binary(pulsarterm=True):
         )
     
     if pulsarterm:
-        return functools.partial(phase_connected_binary, psr_term=True)
+        if evolve:
+            return functools.partial(phase_connected_binary, psr_term=True, evolve=evolve)
+        return functools.partial(phase_connected_binary, psr_term=True, evolve=False)
     else:
-        return functools.partial(phase_connected_binary, psr_term=False, p_dist=0.0)
+        if evolve:
+            return functools.partial(phase_connected_binary, psr_term=False, p_dist=0.0, evolve=evolve)
+        return functools.partial(phase_connected_binary, psr_term=False, p_dist=0.0, evolve=False)
 
 def make_phase_unconnected_binary(pulsarterm=True):
     @functools.partial(jax.jit, static_argnames=("psr_term", "evolve"))
@@ -444,9 +448,9 @@ def make_phase_unconnected_binary(pulsarterm=True):
         phase0,
         psi,
         p_dist,
+        p_phase,
         psr_term=pulsarterm,
         evolve=True,
-        p_phase=None,
         log10_dist=None,
     ):
 
