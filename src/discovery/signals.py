@@ -427,7 +427,7 @@ def make_fourierbasis_dm(alpha=2.0, tndm=False): #  DM fourier basis shouldn't h
 def make_fourierbasis_chrom(alpha=4.0, tndm=False):
     return make_fourierbasis_dm(alpha=alpha, tndm=tndm)
 
-def makegp_fourier(psr, prior, components, T=None, mean=None, fourierbasis=fourierbasis, common=[], exclude=['f', 'df'], name='fourierGP'):
+def makegp_fourier(psr, prior, components, T=None, mean=None, fourierbasis=fourierbasis, common=[], exclude=['f', 'df'], name='fourierGP', noisedict={}):
     argspec = inspect.getfullargspec(prior)
     argmap = [(arg if arg in common else f'{name}_{arg}' if f'{name}_{arg}' in common else f'{psr.name}_{name}_{arg}') +
               (f'({components[arg] if isinstance(components, dict) else components})' if argspec.annotations.get(arg) == typing.Sequence else '')
@@ -455,10 +455,14 @@ def makegp_fourier(psr, prior, components, T=None, mean=None, fourierbasis=fouri
             return fmat(*[params[arg] for arg in fargmap])
         fmatfunc.params = fargmap
 
-    gp = matrix.VariableGP(matrix.NoiseMatrix12D_var(priorfunc), fmatfunc if callable(fmat) else fmat)
-    gp.index = {f'{psr.name}_{name}_coefficients({len(f)})': slice(0,len(f))} # better for cosine
-    gp.name, gp.pos = psr.name, psr.pos
-    gp.gpname, gp.gpcommon = name, common
+    # noisedict modification may not work in all cases
+    if all(arg in noisedict for arg in argmap):
+        return matrix.ConstantGP(matrix.NoiseMatrix1D_novar(priorfunc(noisedict)), fmat)
+    else:
+        gp = matrix.VariableGP(matrix.NoiseMatrix12D_var(priorfunc), fmatfunc if callable(fmat) else fmat)
+        gp.index = {f'{psr.name}_{name}_coefficients({len(f)})': slice(0,len(f))} # better for cosine
+        gp.name, gp.pos = psr.name, psr.pos
+        gp.gpname, gp.gpcommon = name, common
 
     if mean is not None:
         margspec = inspect.getfullargspec(mean)
